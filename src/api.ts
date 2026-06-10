@@ -10,19 +10,28 @@ import {
 import { getConfig } from './config.js';
 
 // ---------------------------------------------------------------------------
+// Internal HTTP error (used by retry layer before converting to VisionError)
+// ---------------------------------------------------------------------------
+
+class HttpError extends Error {
+  status: number;
+  retryAfter?: string;
+
+  constructor(status: number, message: string, retryAfter?: string) {
+    super(message);
+    this.name = 'HttpError';
+    this.status = status;
+    this.retryAfter = retryAfter;
+    Object.setPrototypeOf(this, HttpError.prototype);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Retry utility
 // ---------------------------------------------------------------------------
 
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 const MAX_RETRIES = 2;
-
-function isRetryableError(error: unknown): boolean {
-  if (error instanceof VisionError) {
-    return false; // Already classified, don't retry
-  }
-  // Network-level fetch failures (TypeError, ECONNREFUSED, etc.)
-  return error instanceof TypeError || error instanceof Error;
-}
 
 function isRetryableStatus(status: number): boolean {
   return RETRYABLE_STATUS_CODES.has(status);
@@ -64,53 +73,49 @@ async function withRetry<T>(
         throw new VisionError('ABORTED', 'Request was cancelled');
       }
 
-      // Classified non-retryable errors
-      if (error instanceof VisionError) {
-        throw error;
-      }
-
-      // Non-retryable network or HTTP errors on last attempt
+      // Non-retryable on last attempt
       if (attempt === MAX_RETRIES) {
         break;
       }
 
-      // Only retry network errors and certain status codes
-      const status = (error as { status?: number }).status;
-      if (status && !isRetryableStatus(status)) {
-        break;
+      // Classify retryability
+      let shouldRetry = false;
+      let retryAfter: string | undefined;
+
+      if (error instanceof HttpError) {
+        if (isRetryableStatus(error.status)) {
+          shouldRetry = true;
+          retryAfter = error.retryAfter;
+        }
+      } else if (error instanceof TypeError || error instanceof Error) {
+        // Network-level fetch failures (ECONNREFUSED, DNS, etc.)
+        shouldRetry = true;
       }
-      if (!status && !isRetryableError(error)) {
+
+      if (!shouldRetry) {
         break;
       }
 
-      // Determine backoff delay (Retry-After header handled in caller)
-      const backoffMs = getRetryDelay(attempt, null);
+      const backoffMs = getRetryDelay(attempt, retryAfter ?? null);
       await delay(backoffMs);
     }
   }
 
-  // All retries exhausted
+  // All retries exhausted — convert lastError to VisionError
+  if (lastError instanceof HttpError) {
+    const status = lastError.status;
+    if (status === 429) {
+      throw new VisionError('API_ERROR', 'Rate limited after retries', status);
+    }
+    throw new VisionError('API_ERROR', `Z.AI server error (${status})`, status);
+  }
+
   if (lastError instanceof VisionError) {
     throw lastError;
   }
 
-  const status = (lastError as { status?: number }).status;
-  if (status && isRetryableStatus(status)) {
-    const code: VisionErrorCode =
-      status === 429 ? 'API_ERROR' : 'API_ERROR';
-    throw new VisionError(
-      code,
-      status === 429
-        ? 'Rate limited after retries'
-        : `Z.AI server error (${status})`,
-      status,
-    );
-  }
-
-  throw new VisionError(
-    'NETWORK_ERROR',
-    'Unable to reach Z.AI API',
-  );
+  // Network failure after retries
+  throw new VisionError('NETWORK_ERROR', 'Unable to reach Z.AI API');
 }
 
 // ---------------------------------------------------------------------------
@@ -126,46 +131,24 @@ async function postChatCompletions(
 
   const timeoutMs = options?.timeoutMs ?? config.timeoutMs;
   const controller = new AbortController();
-
-  // Timeout signal
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  if (timeoutMs > 0 && typeof AbortSignal !== 'undefined') {
-    // Node ≥20: AbortSignal.timeout()
-    const abortSignalCtor = AbortSignal as unknown as {
-      timeout?: (ms: number) => AbortSignal;
-    };
-    if (typeof abortSignalCtor.timeout === 'function') {
-      try {
-        const timeoutSignal = abortSignalCtor.timeout(timeoutMs);
-        timeoutSignal.addEventListener('abort', () => controller.abort());
-      } catch {
-        // Fallback
-      }
-    }
-  }
-
-  // Manual timeout fallback (covers Node <20 and timeout fallback)
-  timeoutId = setTimeout(() => {
-    controller.abort();
-  }, timeoutMs);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   // Compose with caller signal
   if (options?.signal) {
-    const callerSignal = options.signal;
-    const onAbort = () => controller.abort();
-    callerSignal.addEventListener('abort', onAbort, { once: true });
+    const callerOnAbort = () => controller.abort();
+    options.signal.addEventListener('abort', callerOnAbort, { once: true });
 
-    // Clean up if our controller fires first
+    // Clean up listener if our controller fires first (timeout)
     controller.signal.addEventListener(
       'abort',
       () => {
-        callerSignal.removeEventListener('abort', onAbort);
+        options.signal?.removeEventListener('abort', callerOnAbort);
       },
       { once: true },
     );
   }
 
-  let response: Response | undefined;
+  let response: Response;
 
   try {
     response = await fetch(url, {
@@ -180,18 +163,15 @@ async function postChatCompletions(
   } catch (fetchError) {
     clearTimeout(timeoutId);
 
+    // Distinguish caller abort vs timeout vs network failure
+    if (options?.signal?.aborted) {
+      throw new VisionError('ABORTED', 'Request was cancelled');
+    }
     if (controller.signal.aborted) {
-      // Distinguish timeout vs caller abort
-      if (options?.signal?.aborted) {
-        throw new VisionError('ABORTED', 'Request was cancelled');
-      }
-      throw new VisionError(
-        'TIMEOUT',
-        `Request timed out after ${timeoutMs}ms`,
-      );
+      throw new VisionError('TIMEOUT', `Request timed out after ${timeoutMs}ms`);
     }
 
-    // Network-level failure
+    // Network-level failure — throw plain Error for retry layer
     throw fetchError;
   }
 
@@ -227,31 +207,16 @@ async function postChatCompletions(
   }
 
   if (status === 429) {
-    const retryAfter = response.headers.get('retry-after');
-    // Attach retry-after hint for retry layer
-    const err = new VisionError(
-      'API_ERROR',
-      'Rate limited',
-      status,
-    ) as VisionError & { retryAfter?: string };
-    err.retryAfter = retryAfter ?? undefined;
-    throw err;
+    const retryAfter = response.headers.get('retry-after') ?? undefined;
+    throw new HttpError(429, 'Rate limited', retryAfter);
   }
 
   if (status >= 500) {
-    throw new VisionError(
-      'API_ERROR',
-      `Z.AI server error (${status})`,
-      status,
-    );
+    throw new HttpError(status, `Z.AI server error (${status})`);
   }
 
   if (!response.ok) {
-    throw new VisionError(
-      'API_ERROR',
-      `Unexpected HTTP ${status}`,
-      status,
-    );
+    throw new HttpError(status, `Unexpected HTTP ${status}`);
   }
 
   // Parse response
