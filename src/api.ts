@@ -302,13 +302,14 @@ export async function videoAnalyze(
 ): Promise<string> {
   const config = getConfig();
 
-  const messages: ChatMessage[] = [
-    { role: 'system', content: systemPrompt },
-    {
-      role: 'user',
-      content: [videoSource, { type: 'text', text: userPrompt }],
-    },
-  ];
+  const messages: ChatMessage[] = [];
+  if (systemPrompt) {
+    messages.push({ role: 'system', content: systemPrompt });
+  }
+  messages.push({
+    role: 'user',
+    content: [videoSource, { type: 'text', text: userPrompt }],
+  });
 
   const body: VisionRequest = {
     model: config.model,
