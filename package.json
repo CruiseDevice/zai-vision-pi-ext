@@ -1,0 +1,22 @@
+{
+  "name": "zai-vision-pi-ext",
+  "version": "0.1.0",
+  "description": "pi extension providing vision tools powered by Z.AI / Zhipu AI (GLM-4.6v, GLM-4.5v)",
+  "license": "Apache-2.0",
+  "author": "",
+  "keywords": [
+    "pi-extension",
+    "vision",
+    "zai",
+    "zhipu",
+    "glm"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2"
+  }
+}
