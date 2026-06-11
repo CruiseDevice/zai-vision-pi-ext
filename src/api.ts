@@ -87,7 +87,7 @@ async function withRetry<T>(
           shouldRetry = true;
           retryAfter = error.retryAfter;
         }
-      } else if (error instanceof TypeError || error instanceof Error) {
+      } else if (error instanceof TypeError) {
         // Network-level fetch failures (ECONNREFUSED, DNS, etc.)
         shouldRetry = true;
       }
@@ -105,7 +105,7 @@ async function withRetry<T>(
   if (lastError instanceof HttpError) {
     const status = lastError.status;
     if (status === 429) {
-      throw new VisionError('API_ERROR', 'Rate limited after retries', status);
+      throw new VisionError('API_ERROR', `Rate limited after retries: ${lastError.message}`, status);
     }
     throw new VisionError('API_ERROR', `Z.AI server error (${status})`, status);
   }
@@ -156,6 +156,10 @@ async function postChatCompletions(
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${config.apiKey}`,
+        // Required by Z.AI: the X-Title header routes the request to the
+        // MCP access tier. Without it, the API returns 429 "insufficient
+        // balance" even for subscribed accounts.
+        'X-Title': '4.5V MCP Local',
       },
       body: JSON.stringify(body),
       signal: controller.signal,
@@ -208,7 +212,43 @@ async function postChatCompletions(
 
   if (status === 429) {
     const retryAfter = response.headers.get('retry-after') ?? undefined;
-    throw new HttpError(429, 'Rate limited', retryAfter);
+
+    // Parse response body to distinguish genuine rate-limiting from other
+    // quota/balance errors that Z.AI also surfaces as 429 (e.g. code 1113:
+    // "Insufficient balance or no resource package").
+    let bodyMessage: string | undefined;
+    let bodyCode: string | number | undefined;
+    try {
+      const body = (await response.json()) as Record<string, unknown>;
+      const errorObj =
+        typeof body.error === 'object' && body.error !== null
+          ? (body.error as Record<string, unknown>)
+          : undefined;
+      bodyMessage =
+        (typeof errorObj?.message === 'string' ? errorObj.message : undefined) ||
+        (typeof body.message === 'string' ? body.message : undefined);
+      const rawCode = errorObj?.code ?? body.code;
+      bodyCode = typeof rawCode === 'string' || typeof rawCode === 'number' ? rawCode : undefined;
+    } catch {
+      // ignore parse failure
+    }
+
+    // Known non-retryable quota/balance errors that Z.AI returns as 429
+    const NON_RETRYABLE_429_CODES = new Set(['1113']);
+    if (
+      typeof bodyCode === 'string' && NON_RETRYABLE_429_CODES.has(bodyCode) ||
+      typeof bodyCode === 'number' && NON_RETRYABLE_429_CODES.has(String(bodyCode))
+    ) {
+      throw new VisionError(
+        'API_ERROR',
+        bodyMessage ?? 'Request rejected (429)',
+        status,
+      );
+    }
+
+    // If we got a body message, include it for context but still retry
+    const detail = bodyMessage ? `: ${bodyMessage}` : '';
+    throw new HttpError(429, `Rate limited${detail}`, retryAfter);
   }
 
   if (status >= 500) {
@@ -249,7 +289,7 @@ async function postChatCompletions(
     );
   }
 
-  return content;
+  return content.trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +322,7 @@ export async function visionAnalyze(
     model: config.model,
     messages,
     stream: false,
+    thinking: { type: 'enabled' },
     temperature: options?.temperature ?? 0.8,
     top_p: options?.top_p ?? 0.6,
     max_tokens: options?.max_tokens ?? config.maxTokens,
@@ -315,6 +356,7 @@ export async function videoAnalyze(
     model: config.model,
     messages,
     stream: false,
+    thinking: { type: 'enabled' },
     temperature: options?.temperature ?? 0.8,
     top_p: options?.top_p ?? 0.6,
     max_tokens: options?.max_tokens ?? config.maxTokens,

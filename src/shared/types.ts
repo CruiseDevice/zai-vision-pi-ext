@@ -68,6 +68,7 @@ export interface VisionRequest {
   model: string;
   messages: ChatMessage[];
   stream: boolean;
+  thinking?: { type: string };
   temperature: number;
   top_p: number;
   max_tokens: number;
@@ -124,13 +125,32 @@ export interface ApiOptions {
 }
 
 // ---------------------------------------------------------------------------
-// Tool Result (pi-compatible return shape)
+// Tool Details (strict typing for AgentToolResult<TDetails>)
 // ---------------------------------------------------------------------------
 
-export interface ToolResult {
-  content: Array<{ type: 'text'; text: string }>;
-  isError?: boolean;
+export interface BaseToolDetails {
+  toolName: string;
+  userPrompt: string;
+  systemPrompt?: string;
 }
+
+export interface ImageToolDetails extends BaseToolDetails {
+  imageCount: number;
+  imageSources: string[];
+}
+
+export interface VideoToolDetails extends BaseToolDetails {
+  videoSource: string;
+}
+
+export interface ErrorToolDetails {
+  toolName: string;
+  userPrompt: string;
+  errorCode: VisionErrorCode;
+  errorMessage: string;
+}
+
+export type VisionToolDetails = ImageToolDetails | VideoToolDetails | ErrorToolDetails;
 
 
 

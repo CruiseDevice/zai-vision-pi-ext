@@ -1,14 +1,22 @@
 /**
  * Z.AI Vision Pi Extension — Entry Point
  *
- * Stub that loads the extension infrastructure, validates configuration
- * on session start, and registers the /zai status command.
- * Vision tools will be registered in Phase 3.
+ * Registers 8 vision tools and the /zai status command.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getConfig } from "./config.js";
 import { VisionError } from "./shared/types.js";
+
+// Import all tool definitions
+import { analyzeImageTool } from "./tools/general-image.js";
+import { extractTextTool } from "./tools/text-extraction.js";
+import { diagnoseErrorTool } from "./tools/error-diagnosis.js";
+import { understandDiagramTool } from "./tools/diagram-analysis.js";
+import { analyzeDataVizTool } from "./tools/data-viz.js";
+import { uiToArtifactTool } from "./tools/ui-to-artifact.js";
+import { uiDiffTool } from "./tools/ui-diff.js";
+import { analyzeVideoTool } from "./tools/video-analysis.js";
 
 export default function (pi: ExtensionAPI) {
   // -------------------------------------------------------------------------
@@ -31,6 +39,18 @@ export default function (pi: ExtensionAPI) {
       }
     }
   });
+
+  // -------------------------------------------------------------------------
+  // Register all 8 vision tools
+  // -------------------------------------------------------------------------
+  pi.registerTool(analyzeImageTool);
+  pi.registerTool(extractTextTool);
+  pi.registerTool(diagnoseErrorTool);
+  pi.registerTool(understandDiagramTool);
+  pi.registerTool(analyzeDataVizTool);
+  pi.registerTool(uiToArtifactTool);
+  pi.registerTool(uiDiffTool);
+  pi.registerTool(analyzeVideoTool);
 
   // -------------------------------------------------------------------------
   // /zai command — show current configuration status

@@ -8,9 +8,13 @@ import { ImageContent, VideoContent, VisionError } from './shared/types.js';
 
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv']);
+// NOTE: Z.AI docs list mp4, mkv, mov as supported. Other formats (webm, avi, m4v)
+// are not documented and should be added only after live verification.
 
 const IMAGE_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
-const VIDEO_MAX_BYTES = 8 * 1024 * 1024; // 8 MB
+// API limit is 200 MB per video, but base64 expansion adds ~33% payload overhead.
+// We enforce a conservative client-side limit for local files.
+const VIDEO_MAX_BYTES = 50 * 1024 * 1024; // 50 MB
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -107,7 +111,9 @@ export async function resolveImageSource(source: string): Promise<ImageContent> 
  * Remote URLs are passed through unchanged. Local files are validated,
  * read, and encoded as base64 data URLs.
  *
- * Base64 video is confirmed supported by Z.AI/Zhipu.
+ * Base64 video is demonstrated in official Zhipu cookbooks (GLM-4.5V),
+ * but the primary API docs describe video input as "Video URL address".
+ * Base64 is treated as supported but model-dependent.
  */
 export async function resolveVideoSource(source: string): Promise<VideoContent> {
   if (isUrl(source)) {
